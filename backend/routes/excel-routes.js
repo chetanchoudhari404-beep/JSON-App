@@ -1,11 +1,64 @@
 const express = require('express');
-const XLSX = require('xlsx');
+const fs = require('fs');
 const path = require('path');
-const upload = require('../config/multer-config'); 
+const upload = require('../config/multer-config');
 
 const router = express.Router();
 
-// API Endpoint 1: Handle File Upload
+// A helper function to recursively find all arrays of objects
+const findArrays = (obj, currentPath = '') => {
+    let results = [];
+    if (typeof obj !== 'object' || obj === null) {
+        return results;
+    }
+
+    if (Array.isArray(obj)) {
+        if (obj.length === 0 || (obj.length > 0 && typeof obj[0] === 'object' && !Array.isArray(obj[0]))) {
+            results.push({ path: currentPath, data: obj });
+        }
+        return results;
+    }
+
+    for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            const newPath = currentPath ? `${currentPath}.${key}` : key;
+            const value = obj[key];
+            
+            if (Array.isArray(value)) {
+                if (value.length === 0 || (value.length > 0 && typeof value[0] === 'object' && !Array.isArray(value[0]))) {
+                    results.push({ path: newPath, data: value });
+                }
+            } else if (typeof value === 'object' && value !== null) {
+                results = results.concat(findArrays(value, newPath));
+            }
+        }
+    }
+    return results;
+};
+
+//---
+
+// Endpoint 1: Get File List
+const storageDir = path.join(__dirname, '../uploads');
+router.get('/files', (req, res) => {
+    try {
+        if (!fs.existsSync(storageDir)) {
+            fs.mkdirSync(storageDir, { recursive: true });
+        }
+        const files = fs.readdirSync(storageDir).map(file => ({
+            name: file,
+            path: path.join(storageDir, file)
+        }));
+        res.json(files);
+    } catch (error) {
+        console.error('Error fetching file list:', error);
+        res.status(500).json({ message: 'Failed to retrieve file list.' });
+    }
+});
+
+//---
+
+// Endpoint 2: Handle File Upload
 router.post('/upload', upload.single('excelFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).send('No file uploaded.');
@@ -14,136 +67,71 @@ router.post('/upload', upload.single('excelFile'), (req, res) => {
     res.json({
         message: 'File uploaded successfully',
         name: req.file.originalname,
-        path: req.file.path 
+        path: req.file.path
     });
 });
 
-// API Endpoint 2: Get Excel Data (Stable Version)
+//---
+
+// Endpoint 3: Get JSON Data (Optimized for nested arrays)
 router.get('/excel-data', (req, res) => {
-    const filePath = req.query.path;
-    const sheetName = req.query.sheet;
+    const { path: filePath, sheet: selectedSheet } = req.query;
     
     if (!filePath) {
         return res.status(400).send('File path is required.');
     }
 
     try {
-        const workbook = XLSX.readFile(filePath);
-        
-        const visibleSheetNames = workbook.Workbook.Sheets
-            .filter(sheetInfo => !sheetInfo.Hidden)
-            .map(sheetInfo => sheetInfo.name);
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        const fullJsonData = JSON.parse(fileContent);
 
-        let targetSheetName = sheetName || visibleSheetNames[0];
+        const foundArrays = findArrays(fullJsonData);
+        const sheetNames = foundArrays.map(arr => arr.path);
 
-        if (!visibleSheetNames.includes(targetSheetName)) {
-            targetSheetName = visibleSheetNames[0];
-        }
+        const currentSheetPath = selectedSheet && sheetNames.includes(selectedSheet)
+            ? selectedSheet
+            : sheetNames[0];
 
-        if (!targetSheetName) {
-            return res.status(404).json({ filename: path.basename(filePath), sheetNames: [], headers: [], rows: [] })
-        }
-        
-        const worksheet = workbook.Sheets[targetSheetName]
+        const selectedSheetData = foundArrays.find(arr => arr.path === currentSheetPath);
+        const dataToDisplay = selectedSheetData ? selectedSheetData.data : [];
 
-        let headers = [];
-        let rows = [];
-
-        if (worksheet && worksheet['!ref']) {
-            let range = XLSX.utils.decode_range(worksheet['!ref']);
-            let headerRowIndex = -1;
-            const MIN_HEADERS_COUNT = 2;
-
-            for (let R = range.s.r; R <= range.e.r; ++R) {
-                let populatedCellsCount = 0;
-                for (let C = range.s.c; C <= range.e.c; ++C) {
-                    const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
-                    if (worksheet[cellAddress] && worksheet[cellAddress].v) {
-                        populatedCellsCount++;
-                    }
-                }
-                if (populatedCellsCount >= MIN_HEADERS_COUNT) {
-                    headerRowIndex = R;
-                    break;
-                }
-            }
-            
-            if (headerRowIndex !== -1) {
-                const newRange = XLSX.utils.encode_range({s: {r: headerRowIndex, c: range.s.c}, e: range.e});
-                
-                // Use defval: '' to handle empty cells gracefully
-                const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1, range: newRange, defval: '' }); 
-                
-                headers = rawData.length > 0 ? rawData[0] : [];
-                const rowArrays = rawData.slice(1);
-                
-                rows = rowArrays
-                    .map(row => {
-                        const obj = {};
-                        row.forEach((cell, i) => {
-                            if (headers[i] !== undefined && headers[i] !== null) { 
-                                obj[headers[i]] = cell;
-                            }
-                        });
-                        return obj;
-                    })
-                    // Filter out completely empty objects/rows 
-                    .filter(obj => Object.values(obj).some(val => val !== ''));
-            }
-        }
+        const headers = dataToDisplay.length > 0 ? Object.keys(dataToDisplay[0]) : [];
 
         res.json({
             filename: path.basename(filePath),
-            path: filePath, 
-            sheetNames: visibleSheetNames,
-            currentSheet: targetSheetName,
+            path: filePath,
+            sheetNames: sheetNames,
+            currentSheet: currentSheetPath,
             headers: headers,
-            rows: rows
-        })
-
+            rows: dataToDisplay,
+            fullJsonData: fullJsonData
+        });
     } catch (error) {
-        console.error('Error reading Excel file:', error)
+        console.error('Error reading JSON file:', error);
         if (error.code === 'ENOENT') {
-            return res.status(404).send('File not found.')
+            return res.status(404).send('File not found.');
         }
-        res.status(500).send('Failed to read or parse Excel file.')
+        if (error instanceof SyntaxError) {
+            return res.status(400).send('Invalid JSON file format.');
+        }
+        res.status(500).send('Failed to read or parse JSON file.');
     }
 });
 
-// API Endpoint 3: Save Changes (FIXED LOGIC to preserve headers)
+//---
+
+// Endpoint 4: Save Changes
 router.post('/excel-data/save', (req, res) => {
-    // NEW: Destructure headers from the request body
-    const { filePath, sheetName, rows, headers } = req.body; 
+    const { filePath, fullJsonData } = req.body;
     
-    // Check for headers if rows are empty (required for saving an empty sheet)
-    if (!filePath || !sheetName || !rows || (rows.length === 0 && !headers)) {
-        return res.status(400).send('File path, sheet name, and data/headers are required.');
+    if (!filePath || !fullJsonData) {
+        return res.status(400).send('File path and full JSON data are required.');
     }
 
     try {
-        const workbook = XLSX.readFile(filePath);
-        
-        let newWorksheet;
-        
-        if (rows.length > 0) {
-            // Case 1: Data exists, use json_to_sheet (infers headers from rows)
-            newWorksheet = XLSX.utils.json_to_sheet(rows);
-        } else if (headers && headers.length > 0) {
-            // Case 2: Data is empty, but headers are provided. 
-            // Use aoa_to_sheet to write ONLY the header row.
-            newWorksheet = XLSX.utils.aoa_to_sheet([headers]);
-        } else {
-            // Case 3: Completely empty sheet
-            newWorksheet = {};
-        }
-
-        // Update the specific sheet in the workbook
-        workbook.Sheets[sheetName] = newWorksheet;
-        
-        XLSX.writeFile(workbook, filePath);
-        
+        const jsonString = JSON.stringify(fullJsonData, null, 2);
+        fs.writeFileSync(filePath, jsonString, 'utf8');
         res.status(200).json({ message: 'File saved successfully.' });
-
     } catch (error) {
         console.error('Error saving file:', error);
         res.status(500).send('Failed to save changes.');

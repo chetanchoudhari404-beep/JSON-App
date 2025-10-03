@@ -23,12 +23,13 @@ const LeftPanel = ({ excelFiles, onFileSelected, onFileUpload }) => {
                         className='bg-green-600 hover:bg-green-700 text-white block text-center p-3 cursor-pointer transition flex items-center justify-center font-semibold text-sm'
                     >
                         <Upload className='w-4 h-4 mr-2' />
-                        Upload New Excel
+                        Upload New JSON
                     </label>
                     <input 
                         id="excel-upload"
                         type="file"
-                        accept=".xls, .xlsx, .xlsm" 
+                        // Change the 'accept' attribute to '.json'
+                        accept=".json" 
                         className='hidden'
                         onChange={handleFileChange}
                     />
